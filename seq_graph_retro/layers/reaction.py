@@ -6,6 +6,33 @@ import math
 
 from seq_graph_retro.molgraph.mol_features import BINARY_FDIM
 
+
+def create_scope_tensor(atom_scope, device=None):
+    scope_sizes = [i[1] for i in atom_scope]
+    return scope_sizes, scope_sizes
+
+
+def flat_to_batch(c_atom, scope_tensor):
+    c_atom_batch = torch.split(c_atom[1:], scope_tensor)
+    c_atom_batch = nn.utils.rnn.pad_sequence(c_atom_batch, batch_first=True)
+    return c_atom_batch
+
+
+def batch_to_flat(c_atom_batch, scope_tensor):
+    c_atom_flat = []
+    for mol, size in zip(c_atom_batch, scope_tensor):
+        c_atom_flat.append(mol[:size])
+    c_atom_flat = torch.cat(c_atom_flat, dim=0)
+    return c_atom_flat
+
+
+def get_pair(c_atom_batch):
+    max_atoms = c_atom_batch.shape[1]
+    x_i = c_atom_batch.unsqueeze(2).expand(-1, -1, max_atoms, -1)
+    x_j = c_atom_batch.unsqueeze(1).expand(-1, max_atoms, -1, -1)
+    return x_i - x_j
+
+
 class AtomAttention(nn.Module):
     """Pairwise atom attention layer."""
     # Update this attention layer
@@ -82,6 +109,7 @@ class AtomAttention(nn.Module):
 
         c_atom_att = torch.cat([c_atom_att.new_zeros(1, self.hsize), c_atom_att], dim=0)
         return c_mol_att, c_atom_att
+
 
 class PairFeat(nn.Module):
     """Computes embeddings for pairs of atoms. Precursor to predicting bond formation."""

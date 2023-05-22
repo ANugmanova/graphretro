@@ -28,7 +28,13 @@ def build_edits_config(loaded_config):
         config['n_atom_feat'] = ATOM_FDIM + len(RXN_CLASSES)
     else:
         config['n_atom_feat'] = ATOM_FDIM
+    if loaded_config.get('use_atom_pretraining', False):
+        config['n_atom_feat'] += loaded_config['pretraining_size']
+
     config['n_bond_feat'] = BOND_FDIM
+    if loaded_config.get('use_bond_pretraining', False):
+        config['n_bond_feat'] += loaded_config['pretraining_size']
+
     config['n_bin_feat'] = BINARY_FDIM
     config['rnn_type'] = loaded_config['rnn_type']
     config['mpn_size'] = loaded_config['mpn_size']
@@ -52,6 +58,10 @@ def build_edits_config(loaded_config):
             config['bond_label_feat'] = ATOM_FDIM + 1 + 2 * (BOND_FDIM-1) + len(RXN_CLASSES)
         else:
             config['bond_label_feat'] = ATOM_FDIM + 1 + 2 * (BOND_FDIM-1)
+
+        if loaded_config.get('use_bond_pretraining', False):
+            config['bond_label_feat'] += loaded_config['pretraining_size']
+
     config['dropout_mlp'] = loaded_config['dropout_mlp']
     config['dropout_mpn'] = loaded_config['dropout_mpn']
     config['pos_weight'] = loaded_config['pos_weight']

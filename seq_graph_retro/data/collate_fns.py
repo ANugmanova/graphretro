@@ -8,6 +8,7 @@ from seq_graph_retro.utils.torch import create_pad_tensor
 
 from typing import Any, List, Dict, Tuple
 
+
 def prepare_lg_labels(lg_dict: Dict, lg_data: List) -> torch.Tensor:
     """Prepare leaving group tensors.
 
@@ -27,7 +28,9 @@ def prepare_lg_labels(lg_dict: Dict, lg_data: List) -> torch.Tensor:
         labels[i, :len(lgs)] = torch.tensor(lgs)
     return labels, lengths
 
+
 def pack_graph_feats(graph_batch: List[Any], directed: bool, use_rxn_class: bool = False,
+                     atom_embeddings: List[Any] = None, bond_embeddings: List[Any] = None,
                      return_graphs: bool = False) -> Tuple[torch.Tensor, List[Tuple[int]]]:
     """Prepare graph tensors.
 
@@ -43,8 +46,17 @@ def pack_graph_feats(graph_batch: List[Any], directed: bool, use_rxn_class: bool
         Whether to return the graphs
     """
     if directed:
-        fnode = [get_atom_features(Chem.Atom("*"), use_rxn_class=use_rxn_class, rxn_class=0)]
-        fmess = [[0,0] + [0] * BOND_FDIM]
+
+        if atom_embeddings:
+            fnode = [get_atom_features(Chem.Atom("*"), use_rxn_class=use_rxn_class, rxn_class=0) + [0] * atom_embeddings[0].shape[1]]
+        else:
+            fnode = [get_atom_features(Chem.Atom("*"), use_rxn_class=use_rxn_class, rxn_class=0)]
+
+        if bond_embeddings:
+            fmess = [[0, 0] + [0] * BOND_FDIM + [0] * bond_embeddings[0].shape[1]]
+        else:
+            fmess = [[0, 0] + [0] * BOND_FDIM]
+
         agraph, bgraph = [[]], [[]]
         atoms_in_bonds = [[]]
 
@@ -71,14 +83,22 @@ def pack_graph_feats(graph_batch: List[Any], directed: bool, use_rxn_class: bool
 
             for v, attr in G.nodes(data='label'):
                 G.nodes[v]['batch_id'] = bid
-                fnode[v] = get_atom_features(mol.GetAtomWithIdx(v-atom_offset),
-                                             use_rxn_class=use_rxn_class,
-                                             rxn_class=graph.rxn_class)
+
+                atom_feat = get_atom_features(mol.GetAtomWithIdx(v-atom_offset),
+                                                  use_rxn_class=use_rxn_class,
+                                                  rxn_class=graph.rxn_class)
+                if atom_embeddings:
+                    atom_feat += atom_embeddings[bid][v-atom_offset].tolist()
+
+                fnode[v] = atom_feat
                 agraph.append([])
 
             bond_comp = [None for _ in range(mol.GetNumBonds())]
             for u, v, attr in G.edges(data='label'):
                 bond_feat = get_bond_features(mol.GetBondBetweenAtoms(u-atom_offset, v-atom_offset)).tolist()
+                if bond_embeddings:
+                    bond_id = tuple_to_bond[tuple(sorted([u - atom_offset, v - atom_offset]))]
+                    bond_feat += bond_embeddings[bid][bond_id].tolist()
 
                 bond = sorted([u, v])
                 mess_vec = [u, v] + bond_feat
@@ -114,8 +134,16 @@ def pack_graph_feats(graph_batch: List[Any], directed: bool, use_rxn_class: bool
             return graph_tensors, scopes
 
     else:
-        afeat = [get_atom_features(Chem.Atom("*"), use_rxn_class=use_rxn_class, rxn_class=0)]
-        bfeat = [[0] * BOND_FDIM]
+        if atom_embeddings:
+            afeat = [get_atom_features(Chem.Atom("*"), use_rxn_class=use_rxn_class, rxn_class=0)] + [0] * atom_embeddings[0].shape[1]
+        else:
+            afeat = [get_atom_features(Chem.Atom("*"), use_rxn_class=use_rxn_class, rxn_class=0)]
+
+        if bond_embeddings:
+            bfeat = [[0] * BOND_FDIM] + [0] * bond_embeddings[0].shape[1]
+        else:
+            bfeat = [[0] * BOND_FDIM]
+
         atoms_in_bonds = [[]]
         agraph, bgraph = [[]], [[]]
         atom_scope = []
@@ -138,14 +166,23 @@ def pack_graph_feats(graph_batch: List[Any], directed: bool, use_rxn_class: bool
 
             for v, attr in G.nodes(data='label'):
                 G.nodes[v]['batch_id'] = bid
-                afeat[v] = get_atom_features(mol.GetAtomWithIdx(v-atom_offset),
-                                             use_rxn_class=use_rxn_class,
-                                             rxn_class=graph.rxn_class)
+                atom_feat = get_atom_features(mol.GetAtomWithIdx(v-atom_offset),
+                                                  use_rxn_class=use_rxn_class,
+                                                  rxn_class=graph.rxn_class)
+                if atom_embeddings:
+                    atom_feat += atom_embeddings[bid][v - atom_offset].tolist()
+
+                afeat[v] = atom_feat
+
                 agraph.append([])
                 bgraph.append([])
 
             for u, v, attr in G.edges(data='label'):
                 bond_feat = get_bond_features(mol.GetBondBetweenAtoms(u-atom_offset, v-atom_offset)).tolist()
+                if bond_embeddings:
+                    bond_id = tuple_to_bond[tuple(sorted([u - atom_offset, v - atom_offset]))]
+                    bond_feat += bond_embeddings[bid][bond_id].tolist()
+
                 bfeat.append(bond_feat)
                 atoms_in_bonds.append([u, v])
 
@@ -172,7 +209,9 @@ def pack_graph_feats(graph_batch: List[Any], directed: bool, use_rxn_class: bool
         else:
             return graph_tensors, scopes
 
+
 def tensorize_bond_graphs(graph_batch, directed: bool, use_rxn_class: False,
+                          atom_embeddings: List[Any] = None, bond_embeddings: List[Any] = None,
                           return_graphs: bool = False):
     if directed:
         edge_dict = {}
@@ -181,6 +220,13 @@ def tensorize_bond_graphs(graph_batch, directed: bool, use_rxn_class: False,
             fmess = [[0, 0] + [0] * (ATOM_FDIM + 10) + [0] + [0] * 2 * (BOND_FDIM - 1)]
         else:
             fmess = [[0, 0] + [0] * ATOM_FDIM + [0] + [0] * 2 * (BOND_FDIM - 1)]
+
+        if atom_embeddings:
+            fmess[0] += [0]*atom_embeddings[0].shape[1]
+
+        if bond_embeddings:
+            fnode[0] += [0]*bond_embeddings[0].shape[1]
+
         agraph, bgraph = [[]], [[]]
         scope = []
 
@@ -205,6 +251,8 @@ def tensorize_bond_graphs(graph_batch, directed: bool, use_rxn_class: False,
                 atom_idx_a, atom_idx_b = u
                 bond_idx = tuple_to_bond[u] + offset
                 fnode[bond_idx] = get_bond_features(mol.GetBondBetweenAtoms(atom_idx_a, atom_idx_b)).tolist()
+                if bond_embeddings:
+                    fnode[bond_idx] += bond_embeddings[bid][tuple_to_bond[u]].tolist()
 
             for u, v in bond_graph.edges():
                 edge_dict[(u, v)] = eid = len(edge_dict) + 1
@@ -218,10 +266,15 @@ def tensorize_bond_graphs(graph_batch, directed: bool, use_rxn_class: False,
                         incommon_ring = 1
                         break
 
-                common_atom = mol.GetAtomWithIdx(list(common_atom_idx)[0])
+                common_atom_idx = list(common_atom_idx)[0]
+                common_atom = mol.GetAtomWithIdx(common_atom_idx)
+
                 edge_feats = get_atom_features(common_atom,
                                                use_rxn_class=use_rxn_class,
                                                rxn_class=graph.rxn_class) + [incommon_ring]
+                if atom_embeddings:
+                    edge_feats += atom_embeddings[bid][common_atom_idx].tolist()
+
                 atom_idx_a, atom_idx_b = u
                 atom_idx_c, atom_idx_d = v
 

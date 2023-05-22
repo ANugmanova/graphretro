@@ -97,6 +97,7 @@ def build_mlp(in_dim: int,
     layers = []
 
     for idx, (prev_size, next_size) in enumerate(mlp_size_tuple):
+        # layers.append(nn.BatchNorm1d(prev_size))
         layers.append(nn.Linear(prev_size, next_size))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(dropout_p[idx]))

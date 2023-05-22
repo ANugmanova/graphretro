@@ -136,7 +136,8 @@ class SingleEdit(nn.Module):
 
     def _compute_edit_logits(self, graph_tensors: Tuple[torch.Tensor],
                              scopes: Tuple[List],  bg_inputs: torch.Tensor = None,
-                             ha: torch.Tensor = None) -> Tuple[torch.Tensor]:
+                             ha: torch.Tensor = None,
+                             mol_pre_embs: List[torch.Tensor] = None) -> Tuple[torch.Tensor]:
         """
         Computes the edit logits.
 
@@ -162,6 +163,14 @@ class SingleEdit(nn.Module):
         else:
             c_atom_starts = index_select_ND(c_atom, dim=0, index=graph_tensors[-1][:, 0])
             c_atom_ends = index_select_ND(c_atom, dim=0, index=graph_tensors[-1][:, 1])
+
+        if mol_pre_embs:
+            if type(mol_pre_embs) is list:
+                mol_embedding = torch.stack(mol_pre_embs)
+            else:
+                mol_embedding = torch.reshape(mol_pre_embs, (1, -1))
+
+            c_mol = torch.tensor(mol_embedding, dtype=c_mol.dtype).to(self.device)
 
         sum_bonds = c_atom_starts + c_atom_ends
         diff_bonds = torch.abs(c_atom_starts - c_atom_ends)
@@ -201,7 +210,7 @@ class SingleEdit(nn.Module):
         return c_mol, edit_logits, None
 
     def forward(self, graph_tensors: Tuple[torch.Tensor], scopes: Tuple[List],
-                bg_inputs = None) -> Tuple[torch.Tensor]:
+                bg_inputs = None, mol_embs: List[torch.Tensor] = None) -> Tuple[torch.Tensor]:
         """Forward pass
 
         Parameters
@@ -219,12 +228,14 @@ class SingleEdit(nn.Module):
             bg_tensors = self.to_device(bg_tensors)
             bg_inputs = (bg_tensors, bg_scope)
         c_mol, edit_logits, _ = self._compute_edit_logits(graph_tensors, scopes,
-                                                       ha=None, bg_inputs=bg_inputs)
+                                                       ha=None, bg_inputs=bg_inputs, mol_pre_embs=mol_embs)
         return c_mol, edit_logits
 
     def train_step(self, graph_tensors: Tuple[torch.Tensor],
                    scopes: Tuple[List], bg_inputs: Tuple[Tuple[torch.Tensor], Tuple[List]],
-                   edit_labels: List[torch.Tensor], **kwargs) -> Tuple[torch.Tensor, Dict]:
+                   edit_labels: List[torch.Tensor],
+                   mol_embs: List[torch.Tensor] = None,
+                   **kwargs) -> Tuple[torch.Tensor, Dict]:
         """Train step of the model.
 
         Parameters
@@ -240,7 +251,7 @@ class SingleEdit(nn.Module):
         """
         edit_labels = self.to_device(edit_labels)
 
-        prod_vecs, edit_logits = self(graph_tensors, scopes, bg_inputs)
+        prod_vecs, edit_logits = self(graph_tensors, scopes, bg_inputs, mol_embs)
         if self.config['edit_loss'] == 'sigmoid':
             loss_batch = [self.edit_loss(edit_logits[i].unsqueeze(0), edit_labels[i].unsqueeze(0)).sum()
                           for i in range(len(edit_logits))]
@@ -259,7 +270,11 @@ class SingleEdit(nn.Module):
 
     def eval_step(self, prod_smi_batch: List[str],
                   core_edits_batch: List[str],
-                  rxn_classes: List[int] = None, **kwargs) -> Tuple[torch.Tensor, Dict]:
+                  rxn_classes: List[int] = None,
+                  mol_embeddings: List[float] = None,
+                  atom_embeddings: List[float] = None,
+                  bond_embeddings: List[float] = None,
+                  **kwargs) -> Tuple[torch.Tensor, Dict]:
         """Eval step of the model.
 
         Parameters
@@ -275,17 +290,27 @@ class SingleEdit(nn.Module):
         accuracy = 0.0
 
         for idx, prod_smi in enumerate(prod_smi_batch):
-            if rxn_classes is None:
-                edits = self.predict(prod_smi)
-            else:
-                edits = self.predict(prod_smi, rxn_class=rxn_classes[idx])
+            rxn_class, mol_emb, atom_embs, bond_embs = None, None, None, None
+            if rxn_classes:
+                rxn_class = rxn_classes[idx]
+            if mol_embeddings:
+                mol_emb = [mol_embeddings[idx]]
+            if atom_embeddings:
+                atom_embs = [atom_embeddings[idx]]
+            if bond_embeddings:
+                bond_embs = [bond_embeddings[idx]]
+
+            edits = self.predict(prod_smi, rxn_class=rxn_class,
+                                 mol_embedding=mol_emb, atom_embeddings=atom_embs, bond_embeddings=bond_embs)
             if set(edits) == set(core_edits_batch[idx]):
                 accuracy += 1.0
 
         metrics = {'loss': None, 'accuracy': accuracy}
         return loss, metrics
 
-    def predict(self, prod_smi: str, rxn_class: int = None) -> List:
+    def predict(self, prod_smi: str, rxn_class: int = None,
+                mol_embedding = None, atom_embeddings = None, bond_embeddings = None,
+                ) -> List:
         """Make predictions for given product smiles string.
 
         Parameters
@@ -311,13 +336,20 @@ class SingleEdit(nn.Module):
 
             prod_graph = RxnElement(mol=Chem.Mol(mol), rxn_class=rxn_class)
             prod_tensors, prod_scopes = pack_graph_feats([prod_graph],
-                                                          directed=directed, return_graphs=False,
-                                                          use_rxn_class=use_rxn_class)
+                                                         atom_embeddings=atom_embeddings,
+                                                         bond_embeddings=bond_embeddings,
+                                                         directed=directed, return_graphs=False,
+                                                         use_rxn_class=use_rxn_class)
             bg_inputs = None
             if self.toggles.get("propagate_logits", False):
-                bg_inputs = tensorize_bond_graphs([prod_graph], directed=directed,
-                                                   use_rxn_class=use_rxn_class)
-            _, edit_logits = self(prod_tensors, prod_scopes, bg_inputs)
+                bg_inputs = tensorize_bond_graphs([prod_graph],
+                                                  atom_embeddings=atom_embeddings,
+                                                  bond_embeddings=bond_embeddings,
+                                                  directed=directed,
+                                                  use_rxn_class=use_rxn_class)
+
+            _, edit_logits = self(prod_tensors, prod_scopes, bg_inputs,
+                                  mol_embs=mol_embedding)
             idx = torch.argmax(edit_logits[0])
             val = edit_logits[0][idx]
 

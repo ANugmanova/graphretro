@@ -19,7 +19,9 @@ DATA_DIR = "./datasets/uspto-50k"
 INFO_FILE = "uspto_50k.info.kekulized"
 NUM_SHARDS = 5
 
-def process_batch(edit_graphs, mol_list, args):
+
+def process_batch(edit_graphs, mol_list, mol_embeddings, atom_embeddings, bond_embeddings, args):
+
     assert len(edit_graphs) == len(mol_list)
 
     if args.mode == 'dummy':
@@ -53,15 +55,24 @@ def process_batch(edit_graphs, mol_list, args):
         directed = True
     elif args.mpnn == 'wln':
         directed = False
-
-    prod_inputs = pack_graph_feats(prod_batch, directed=directed, use_rxn_class=args.use_rxn_class)
+    prod_inputs = pack_graph_feats(prod_batch,
+                                   atom_embeddings=atom_embeddings, bond_embeddings=bond_embeddings,
+                                   directed=directed, use_rxn_class=args.use_rxn_class)
     frag_inputs = pack_graph_feats(frag_batch, directed=directed, use_rxn_class=args.use_rxn_class)
     lg_labels, lengths = prepare_lg_labels(lg_vocab, lg_groups)
 
     if args.parse_bond_graph:
-        bond_graph_inputs = tensorize_bond_graphs(prod_batch, directed=directed, use_rxn_class=args.use_rxn_class)
-        return prod_inputs, edit_labels, frag_inputs, lg_labels, lengths, bond_graph_inputs
-    return prod_inputs, edit_labels, frag_inputs, lg_labels, lengths, None
+        bond_graph_inputs = tensorize_bond_graphs(prod_batch,
+                                                  atom_embeddings=atom_embeddings, bond_embeddings=bond_embeddings,
+                                                  directed=directed, use_rxn_class=args.use_rxn_class)
+    else:
+        bond_graph_inputs = None
+    if mol_embeddings:
+        pre_embeddings = mol_embeddings
+    else:
+        pre_embeddings = None
+    return prod_inputs, edit_labels, frag_inputs, lg_labels, lengths, bond_graph_inputs, pre_embeddings
+
 
 def parse_bond_edits_forward(args: Any, mode: str = 'train') -> None:
     """Parse reactions.
@@ -88,6 +99,21 @@ def parse_bond_edits_forward(args: Any, mode: str = 'train') -> None:
     bond_edits_graphs = []
     mol_list = []
 
+    if args.use_atom_pretraining or args.use_bond_pretraining or args.use_mol_pretraining:
+        mol_repr_all = torch.load(os.path.join(args.data_dir, f"{mode}.pt"))
+
+    if args.use_mol_pretraining:
+        mol_pre_embs = [m[1] for m in mol_repr_all]
+        assert len(mol_pre_embs) == len(info_all)
+
+    if args.use_atom_pretraining:
+        atom_pre_embs = [m[2][0] for m in mol_repr_all]
+        assert len(atom_pre_embs) == len(info_all)
+
+    if args.use_bond_pretraining:
+        bond_pre_embs = [m[2][1] for m in mol_repr_all]
+        assert len(bond_pre_embs) == len(info_all)
+
     if args.augment:
         save_dir = os.path.join(args.data_dir, f"{mode}_aug")
     else:
@@ -108,6 +134,9 @@ def parse_bond_edits_forward(args: Any, mode: str = 'train') -> None:
 
     num_batches = 0
     total_examples = 0
+    atom_embeddings = []
+    bond_embeddings = []
+    mol_embeddings = []
 
     for idx, reaction_info in enumerate(info_all):
         rxn_smi = reaction_info.rxn_smi
@@ -115,15 +144,25 @@ def parse_bond_edits_forward(args: Any, mode: str = 'train') -> None:
         products = get_mol(p)
 
         assert len(bond_edits_graphs) == len(mol_list)
+        assert not args.use_atom_pretraining or len(atom_embeddings) == len(mol_list)
+        assert not args.use_bond_pretraining or len(bond_embeddings) == len(mol_list)
+
         if (len(mol_list) % args.batch_size == 0) and len(mol_list):
             print(f"Saving after {total_examples}")
             sys.stdout.flush()
-            batch_tensors = process_batch(bond_edits_graphs, mol_list, args)
+            batch_tensors = process_batch(bond_edits_graphs, mol_list,
+                                          mol_embeddings.copy(),
+                                          atom_embeddings.copy(),
+                                          bond_embeddings.copy(),
+                                          args)
             torch.save(batch_tensors, os.path.join(save_dir, f"batch-{num_batches}.pt"))
 
             num_batches += 1
             mol_list = []
             bond_edits_graphs = []
+            atom_embeddings = []
+            bond_embeddings = []
+            mol_embeddings = []
 
         if (products is None) or (products.GetNumAtoms() <= 1):
             print(f"Product has 0 or 1 atoms, Skipping reaction {idx}")
@@ -175,6 +214,13 @@ def parse_bond_edits_forward(args: Any, mode: str = 'train') -> None:
 
                 bond_edits_graphs.append(bond_edits_graph)
                 mol_list.append((products, copy.deepcopy(reac_mols), copy.deepcopy(frag_mols)))
+                if args.use_atom_pretraining:
+                    atom_embeddings.append(atom_pre_embs[idx])
+                if args.use_bond_pretraining:
+                    bond_embeddings.append(bond_pre_embs[idx])
+                if args.use_mol_pretraining:
+                    mol_embeddings.append(mol_pre_embs[idx])
+
                 total_examples += 1
 
         if (idx % args.print_every == 0) and idx:
@@ -185,14 +231,17 @@ def parse_bond_edits_forward(args: Any, mode: str = 'train') -> None:
     sys.stdout.flush()
 
     assert len(bond_edits_graphs) == len(mol_list)
-    batch_tensors = process_batch(bond_edits_graphs, mol_list, args)
+    batch_tensors = process_batch(bond_edits_graphs, mol_list,
+                                  mol_embeddings.copy(),
+                                  atom_embeddings.copy(),
+                                  bond_embeddings.copy(),
+                                  args)
     torch.save(batch_tensors, os.path.join(save_dir, f"batch-{num_batches}.pt"))
 
     num_batches += 1
-    mol_list = []
-    bond_edits_graphs = []
 
     return num_batches
+
 
 def parse_bond_edits_reverse(args: Any, mode: str = 'train', num_batches: int = None) -> None:
     """Parse reactions.
@@ -329,6 +378,7 @@ def parse_bond_edits_reverse(args: Any, mode: str = 'train', num_batches: int = 
     mol_list = []
     bond_edits_graphs = []
 
+
 def main() -> None:
     parser = argparse.ArgumentParser()
 
@@ -342,6 +392,12 @@ def main() -> None:
     parser.add_argument("--parse_bond_graph", type=str2bool, default=True)
     parser.add_argument("--batch_size", type=int, default=32, help='Batch size to use.')
     parser.add_argument("--augment", type=str2bool, default=False, help="Whether to augment")
+    parser.add_argument("--use_atom_pretraining", type=str2bool, default=False,
+                        help="Whether to use pretraining atom embeddings")
+    parser.add_argument("--use_bond_pretraining", type=str2bool, default=False,
+                        help="Whether to use pretraining bond embeddings")
+    parser.add_argument("--use_mol_pretraining", type=str2bool, default=False,
+                        help="Whether to use pretraining molecular embeddings")
 
     args = parser.parse_args()
 
@@ -350,6 +406,7 @@ def main() -> None:
         parse_bond_edits_reverse(args=args, num_batches=num_batches, mode=args.mode)
     else:
         num_batches = parse_bond_edits_forward(args=args, mode=args.mode)
+
 
 if __name__ == "__main__":
     main()

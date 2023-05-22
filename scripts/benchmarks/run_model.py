@@ -113,10 +113,14 @@ def run_model(config):
 
     if eval_dataset_class is not None:
         eval_dataset = eval_dataset_class(data_dir=eval_dir,
-                                              data_file=config['info_file'],
-                                              labels_file=config['labels_file'] if use_labels else None,
-                                              use_rxn_class=config.get('use_rxn_class', False),
-                                              num_shards=config['num_shards'])
+                                          data_file=config['info_file'],
+                                          labels_file=config['labels_file'] if use_labels else None,
+                                          use_rxn_class=config.get('use_rxn_class', False),
+                                          use_mol_pretraining=config.get('use_mol_pretraining', False),
+                                          use_atom_pretraining=config.get('use_atom_pretraining', False),
+                                          use_bond_pretraining=config.get('use_bond_pretraining', False),
+                                          pretraining_file=os.path.join(config['data_dir'], "eval.pt"),
+                                          num_shards=config['num_shards'])
 
     train_data = train_dataset.create_loader(batch_size=1, shuffle=True,
                                              num_workers=config['num_workers'])

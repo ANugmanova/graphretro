@@ -5,6 +5,7 @@ import joblib
 
 from seq_graph_retro.utils.parse import ReactionInfo
 
+
 class BaseDataset(torch.utils.data.Dataset):
     """BaseDataset is an abstract class that loads the saved tensor batches and
     passes them to the model for training."""
@@ -65,12 +66,15 @@ class BaseDataset(torch.utils.data.Dataset):
         """Processes the batch of tensors to yield corresponding inputs."""
         raise NotImplementedError("Subclasses must implement for themselves")
 
+
 class EvalDataset(torch.utils.data.Dataset):
 
     """EvalDataset is an abstract class that handles evaluation during training."""
 
     def __init__(self, data_dir: str, data_file: str, labels_file: str = None,
-                 num_shards: int = None, use_rxn_class: bool  = False) -> None:
+                 num_shards: int = None, use_rxn_class: bool = False,
+                 use_mol_pretraining: bool = False, use_atom_pretraining: bool = False,
+                 use_bond_pretraining: bool = False, pretraining_file: str = None) -> None:
         """
         Parameters
         ----------
@@ -88,6 +92,9 @@ class EvalDataset(torch.utils.data.Dataset):
         self.data_dir = data_dir
         self.data_file = os.path.join(data_dir, data_file)
         self.use_rxn_class = use_rxn_class
+        self.use_mol_pretraining = use_mol_pretraining
+        self.use_atom_pretraining = use_atom_pretraining
+        self.use_bond_pretraining = use_bond_pretraining
 
         if num_shards is not None:
             self.dataset = []
@@ -102,6 +109,31 @@ class EvalDataset(torch.utils.data.Dataset):
         if labels_file is not None:
             self.labels = joblib.load(os.path.join(data_dir, labels_file))
             assert len(self.labels) == len(self.dataset)
+
+        if use_mol_pretraining or use_atom_pretraining or use_bond_pretraining:
+            mol_repr_all = torch.load(pretraining_file)
+
+            if use_mol_pretraining:
+                mol_embs = [m[1] for m in mol_repr_all]
+            if use_atom_pretraining:
+                atom_embs = [m[2][0] for m in mol_repr_all]
+            if use_bond_pretraining:
+                bond_embs = [m[2][1] for m in mol_repr_all]
+
+            extended_dataset = []
+            for i, d in enumerate(self.dataset):
+                extended_data = [d, None, None, None]
+
+                if use_mol_pretraining:
+                    extended_data[1] = mol_embs[i]
+                if use_atom_pretraining:
+                    extended_data[2] = atom_embs[i]
+                if use_bond_pretraining:
+                    extended_data[3] = bond_embs[i]
+
+                extended_dataset.append(extended_data)
+
+            self.dataset = extended_dataset
 
     def __len__(self) -> int:
         """Returns length of the Dataset."""
